@@ -7096,6 +7096,276 @@ int ImGui::PlotEx(ImGuiPlotType plot_type, const char* label, float (*values_get
     return idx_hovered;
 }
 
+int ImGui::PolarPlot(ImGuiPlotType plot_type, const char* label, float (*values_getter)(void* data, int idx), void* data, int values_count, int values_offset, const char* overlay_text, float scale_min, float scale_max, ImVec2 frame_size)
+{
+    ImGuiContext& g = *GImGui;
+    ImGuiWindow* window = GetCurrentWindow();
+    if (window->SkipItems)
+        return -1;
+
+    const ImGuiStyle& style = g.Style;
+    const ImGuiID id = window->GetID(label);
+
+    const ImVec2 label_size = CalcTextSize(label, NULL, true);
+    if (frame_size.x == 0.0f)
+        frame_size.x = CalcItemWidth();
+    if (frame_size.y == 0.0f)
+        frame_size.y = label_size.y + (style.FramePadding.y * 2);
+
+    const ImRect frame_bb(window->DC.CursorPos, window->DC.CursorPos + frame_size);
+    const ImRect inner_bb(frame_bb.Min + style.FramePadding, frame_bb.Max - style.FramePadding);
+    const ImRect total_bb(frame_bb.Min, frame_bb.Max + ImVec2(label_size.x > 0.0f ? style.ItemInnerSpacing.x + label_size.x : 0.0f, 0));
+    ItemSize(total_bb, style.FramePadding.y);
+    if (!ItemAdd(total_bb, 0, &frame_bb))
+        return -1;
+    const bool hovered = ItemHoverable(frame_bb, id, 0);
+
+    // Determine scale from values if not specified
+    if (scale_min == FLT_MAX || scale_max == FLT_MAX)
+    {
+        float v_min = FLT_MAX;
+        float v_max = -FLT_MAX;
+        for (int i = 0; i < values_count; i++)
+        {
+            const float v = values_getter(data, i);
+            if (v != v) // Ignore NaN values
+                continue;
+            v_min = ImMin(v_min, v);
+            v_max = ImMax(v_max, v);
+        }
+        if (scale_min == FLT_MAX)
+            scale_min = v_min;
+        if (scale_max == FLT_MAX)
+            scale_max = v_max;
+    }
+
+    RenderFrame(frame_bb.Min, frame_bb.Max, GetColorU32(ImGuiCol_FrameBg), true, style.FrameRounding);
+
+    const int values_count_min = (plot_type == ImGuiPlotType_Lines) ? 2 : 1;
+    int idx_hovered = -1;
+    if (values_count >= values_count_min)
+    {
+        int res_w = ImMin((int)frame_size.x, values_count) + ((plot_type == ImGuiPlotType_Lines) ? -1 : 0);
+        int item_count = values_count + ((plot_type == ImGuiPlotType_Lines) ? -1 : 0);
+
+        // Tooltip on hover
+        if (hovered && inner_bb.Contains(g.IO.MousePos))
+        {
+            const float t = ImClamp((g.IO.MousePos.x - inner_bb.Min.x) / (inner_bb.Max.x - inner_bb.Min.x), 0.0f, 0.9999f);
+            const int v_idx = (int)(t * item_count);
+            IM_ASSERT(v_idx >= 0 && v_idx < values_count);
+
+            const float v0 = values_getter(data, (v_idx + values_offset) % values_count);
+            const float v1 = values_getter(data, (v_idx + 1 + values_offset) % values_count);
+            if (plot_type == ImGuiPlotType_Lines)
+                SetTooltip("%d: %8.4g\n%d: %8.4g", v_idx, v0, v_idx + 1, v1);
+            else if (plot_type == ImGuiPlotType_Histogram)
+                SetTooltip("%d: %8.4g", v_idx, v0);
+            idx_hovered = v_idx;
+        }
+
+        float v0 = values_getter(data, (0 + values_offset) % values_count);
+        const ImU32 col_base = GetColorU32((plot_type == ImGuiPlotType_Lines) ? ImGuiCol_PlotLines : ImGuiCol_PlotHistogram);
+        const ImU32 col_hovered = GetColorU32((plot_type == ImGuiPlotType_Lines) ? ImGuiCol_PlotLinesHovered : ImGuiCol_PlotHistogramHovered);
+
+        float theta = v0;
+        assert(0.0f <= theta);
+        assert(theta <= IM_PI);
+        float bin = (inner_bb.Max.x - inner_bb.Min.x) / 10.0f;
+        //////// Multiple lines ///////////////////////////////////////////
+        float thickness = 2.0f;
+        float x_bin = float(bin) / sin(theta);
+        float y_bin = float(bin) / cos(theta);
+
+        float x0, x1, y0, y1;
+        float mx = (inner_bb.Min.x + inner_bb.Max.x) / 2;
+        float my = (inner_bb.Min.y + inner_bb.Max.y) / 2;
+        float lx = (inner_bb.Max.x - inner_bb.Min.x);
+        float ly = (inner_bb.Max.y - inner_bb.Min.y);
+        float tanval = tan(theta);
+        float tanabs = tanval > 0.0f ? tanval : -tanval;
+        float sinval = sin(theta);
+        float cosval = cos(theta);
+        float xm = mx;
+        float ym = my;
+        float tx = 0;
+        float ty = 0;
+
+        // CASE1
+        if (-0.001f < (IM_PI / 2 - theta) && (IM_PI / 2 - theta) < 0.001f) {
+            y0 = inner_bb.Min.y;
+            y1 = inner_bb.Max.y;
+            x0 = mx - bin * floor((mx - inner_bb.Min.x) / bin);
+            x1 = mx - bin * floor((mx - inner_bb.Min.x) / bin);
+            while (x0 < inner_bb.Max.x) {
+                ImVec2 pos0 = ImVec2(x0, y0);
+                ImVec2 pos1 = ImVec2(x1, y1);
+                window->DrawList->AddLine(pos0, pos1, col_base, thickness);
+                x0 = x0 + bin;
+                x1 = x0;
+            }
+        }
+        else if (theta < 0.001f || theta >(IM_PI - 0.001f)) {
+            x0 = inner_bb.Min.x;
+            x1 = inner_bb.Max.x;
+            y0 = my - bin * floor((my - inner_bb.Min.y) / bin);
+            y1 = my - bin * floor((my - inner_bb.Min.y) / bin);
+            while (y0 < inner_bb.Max.y) {
+                ImVec2 pos0 = ImVec2(x0, y0);
+                ImVec2 pos1 = ImVec2(x1, y1);
+                window->DrawList->AddLine(pos0, pos1, col_base, thickness);
+                y0 = y0 + bin;
+                y1 = y0;
+            }
+        }
+        else if (theta < IM_PI / 2) {
+            bin = y_bin;
+            x0 = inner_bb.Min.x;
+            y0 = my - (lx / 2 * tanval);
+            x1 = inner_bb.Max.x;
+            y1 = my + (lx / 2 * tanval);
+            xm = mx;
+            ym = my;
+
+            float y_lim = ly / 2 + lx / 2 * tanabs;
+            float y_max = my + bin * floor(y_lim / bin);
+            ym = my - bin * floor(y_lim / bin);
+
+
+            while (ym <= y_max) {
+                tx = xm - (inner_bb.Max.y - ym) / tanval;
+                ty = inner_bb.Max.y;
+                if (tx < inner_bb.Min.x) {
+                    ty = ym + (lx / 2 * tanval);
+                    tx = inner_bb.Min.x;
+                }
+                x0 = tx;
+                y0 = ty;
+
+                tx = xm + (ym - inner_bb.Min.y) / tanval;
+                ty = inner_bb.Min.y;
+                if (tx > inner_bb.Max.x) {
+                    ty = ym - (lx / 2 * tanval);
+                    tx = inner_bb.Max.x;
+                }
+                x1 = tx;
+                y1 = ty;
+
+                ImVec2 pos0 = ImVec2(x0, y0);
+                ImVec2 pos1 = ImVec2(x1, y1);
+                window->DrawList->AddLine(pos0, pos1, col_base, thickness);
+
+                ym = ym + bin;
+            }
+        }
+        // CASE2
+        else {
+            bin = -y_bin;
+            x0 = inner_bb.Min.x;
+            y0 = my - (lx / 2 * tanval);
+            x1 = inner_bb.Max.x;
+            y1 = my + (lx / 2 * tanval);
+            xm = mx;
+            ym = my;
+
+            float y_lim = ly / 2 + lx / 2 * tanabs;
+            float y_max = my + bin * floor(y_lim / bin);
+            ym = my - bin * floor(y_lim / bin);
+
+
+            while (ym <= y_max) {
+                tx = xm - (inner_bb.Max.y - ym) / tanval;
+                ty = inner_bb.Max.y;
+                if (tx > inner_bb.Max.x) {
+                    ty = ym - (lx / 2 * tanval);
+                    tx = inner_bb.Max.x;
+                }
+                x0 = tx;
+                y0 = ty;
+
+                tx = xm + (ym - inner_bb.Min.y) / tanval;
+                ty = inner_bb.Min.y;
+                if (tx < inner_bb.Min.x) {
+                    ty = ym + (lx / 2 * tanval);
+                    tx = inner_bb.Min.x;
+                }
+                x1 = tx;
+                y1 = ty;
+
+                ImVec2 pos0 = ImVec2(x0, y0);
+                ImVec2 pos1 = ImVec2(x1, y1);
+                window->DrawList->AddLine(pos0, pos1, col_base, thickness);
+
+                ym = ym + bin;
+            }
+        }
+        //ImVec2 pos0 = ImVec2(x0, y0);
+        //ImVec2 pos1 = ImVec2(x1, y1);
+
+        //window->DrawList->AddLine(pos0, pos1, col_base);
+
+        ////////////////////////////////////////////////////////////////////
+
+        //
+        //float x0, x1, y0, y1;
+        //float mx = (inner_bb.Min.x + inner_bb.Max.x) / 2;
+        //float my = (inner_bb.Min.y + inner_bb.Max.y) / 2;
+        //float lx = (inner_bb.Max.x - inner_bb.Min.x);
+        //float ly= (inner_bb.Max.y - inner_bb.Min.y);
+        //float tanval = tan(theta);
+
+        //// CASE1
+        //if (-0.001f < (IM_PI / 2 - theta)  && (IM_PI / 2 - theta) < 0.001f) {
+        //  x0 = mx;
+        //  y0 = inner_bb.Min.y;
+        //  x1 = mx;
+        //  y1 = inner_bb.Max.y;
+        //}
+        //else if (theta <= IM_PI / 4) {
+        //  x0 = inner_bb.Min.x;
+        //  y0 = my + (lx / 2 * tanval);
+        //  x1 = inner_bb.Max.x;
+        //  y1 = my - (lx / 2 * tanval);
+        //}
+        //// CASE2
+        //else if (theta < IM_PI / 2) {
+        //  x0 = mx + (ly / 2 / tanval);
+        //  y0 = inner_bb.Min.y;
+        //  x1 = mx - (ly / 2 / tanval);
+        //  y1 = inner_bb.Max.y;
+        //}
+        //// CASE3
+        //else if (theta <= 3 * IM_PI / 4) {
+        //  x0 = mx - (ly / 2 / tanval);
+        //  y0 = inner_bb.Max.y;
+        //  x1 = mx + (ly / 2 / tanval);
+        //  y1 = inner_bb.Min.y;
+        //}
+        //// CASE4
+        //else {
+        //  x0 = inner_bb.Min.x;
+        //  y0 = my + (lx / 2 * tanval);
+        //  x1 = inner_bb.Max.x;
+        //  y1 = my - (lx / 2 * tanval);
+        //}
+        //ImVec2 pos0 = ImVec2(x0, y0);
+        //ImVec2 pos1 = ImVec2(x1, y1);
+
+        //window->DrawList->AddLine(pos0, pos1, col_base);
+    }
+
+    // Text overlay
+    if (overlay_text)
+        RenderTextClipped(ImVec2(frame_bb.Min.x, frame_bb.Min.y + style.FramePadding.y), frame_bb.Max, overlay_text, NULL, NULL, ImVec2(0.5f, 0.0f));
+
+    if (label_size.x > 0.0f)
+        RenderText(ImVec2(frame_bb.Max.x + style.ItemInnerSpacing.x, inner_bb.Min.y), label);
+
+    // Return hovered index or -1 if none are hovered.
+    // This is currently not exposed in the public API because we need a larger redesign of the whole thing, but in the short-term we are making it available in PlotEx().
+    return idx_hovered;
+}
+
 struct ImGuiPlotArrayGetterData
 {
     const float* Values;
@@ -7120,6 +7390,12 @@ void ImGui::PlotLines(const char* label, const float* values, int values_count, 
 void ImGui::PlotLines(const char* label, float (*values_getter)(void* data, int idx), void* data, int values_count, int values_offset, const char* overlay_text, float scale_min, float scale_max, ImVec2 graph_size)
 {
     PlotEx(ImGuiPlotType_Lines, label, values_getter, data, values_count, values_offset, overlay_text, scale_min, scale_max, graph_size);
+}
+
+void ImGui::PlotPolar(const char* label, const float* values, int values_count, int values_offset, const char* overlay_text, float scale_min, float scale_max, ImVec2 graph_size, int stride)
+{
+    ImGuiPlotArrayGetterData data(values, stride);
+    PolarPlot(ImGuiPlotType_Lines, label, &Plot_ArrayGetter, (void*)&data, values_count, values_offset, overlay_text, scale_min, scale_max, graph_size);
 }
 
 void ImGui::PlotHistogram(const char* label, const float* values, int values_count, int values_offset, const char* overlay_text, float scale_min, float scale_max, ImVec2 graph_size, int stride)
